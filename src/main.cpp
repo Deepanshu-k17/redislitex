@@ -5,6 +5,16 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+std::string handleCommand(const std::string &request)
+{
+  if (request.find("PING") != std::string::npos)
+  {
+    return "+PONG\r\n";
+  }
+
+  return "-ERR unknown command\r\n";
+}
+
 int main()
 {
   const int port = 6379;
@@ -53,15 +63,27 @@ int main()
 
   std::cout << "Client connected\n";
 
-  char buffer[1024]{};
-  ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-
-  if (bytes_read > 0)
+  while (true)
   {
-    std::string request(buffer, bytes_read);
-    std::cout << "Received: " << request << "\n";
+    char buffer[1024]{};
+    ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
-    std::string response = "+PONG\r\n";
+    if (bytes_read == 0)
+    {
+      std::cout << "Client disconnected\n";
+      break;
+    }
+
+    if (bytes_read < 0)
+    {
+      std::cerr << "Error while reading from client\n";
+      break;
+    }
+
+    std::string request(buffer, bytes_read);
+    std::cout << "Received: " << request;
+
+    std::string response = handleCommand(request);
     send(client_fd, response.c_str(), response.size(), 0);
   }
 
