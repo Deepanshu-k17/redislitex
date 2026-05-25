@@ -8,6 +8,7 @@
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
+#include <cctype>
 
 std::unordered_map<std::string, std::string> store;
 std::mutex store_mutex;
@@ -15,6 +16,34 @@ std::mutex store_mutex;
 std::string makeBulkString(const std::string &value)
 {
   return "$" + std::to_string(value.size()) + "\r\n" + value + "\r\n";
+}
+
+bool isInteger(const std::string &value)
+{
+  if (value.empty())
+  {
+    return false;
+  }
+
+  int start = 0;
+  if (value[0] == '-')
+  {
+    if (value.size() == 1)
+    {
+      return false;
+    }
+    start = 1;
+  }
+
+  for (int i = start; i < (int)value.size(); i++)
+  {
+    if (!std::isdigit(value[i]))
+    {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 std::string handleCommand(const std::string &request)
@@ -65,7 +94,21 @@ std::string handleCommand(const std::string &request)
 
     return makeBulkString(it->second);
   }
+  if (command == "EXISTS")
+  {
+    std::string key;
+    ss >> key;
 
+    if (key.empty())
+    {
+      return "-ERR usage: EXISTS key\r\n";
+    }
+
+    std::lock_guard<std::mutex> lock(store_mutex);
+
+    bool found = store.find(key) != store.end();
+    return ":" + std::to_string(found ? 1 : 0) + "\r\n";
+  }
   if (command == "DEL")
   {
     std::string key;
@@ -81,7 +124,64 @@ std::string handleCommand(const std::string &request)
     int deleted = store.erase(key);
     return ":" + std::to_string(deleted) + "\r\n";
   }
+  if (command == "INCR")
+  {
+    std::string key;
+    ss >> key;
 
+    if (key.empty())
+    {
+      return "-ERR usage: INCR key\r\n";
+    }
+
+    std::lock_guard<std::mutex> lock(store_mutex);
+
+    if (store.find(key) == store.end())
+    {
+      store[key] = "1";
+      return ":1\r\n";
+    }
+
+    if (!isInteger(store[key]))
+    {
+      return "-ERR value is not an integer\r\n";
+    }
+
+    long long number = std::stoll(store[key]);
+    number++;
+    store[key] = std::to_string(number);
+
+    return ":" + std::to_string(number) + "\r\n";
+  }
+  if (command == "DECR")
+  {
+    std::string key;
+    ss >> key;
+
+    if (key.empty())
+    {
+      return "-ERR usage: DECR key\r\n";
+    }
+
+    std::lock_guard<std::mutex> lock(store_mutex);
+
+    if (store.find(key) == store.end())
+    {
+      store[key] = "-1";
+      return ":-1\r\n";
+    }
+
+    if (!isInteger(store[key]))
+    {
+      return "-ERR value is not an integer\r\n";
+    }
+
+    long long number = std::stoll(store[key]);
+    number--;
+    store[key] = std::to_string(number);
+
+    return ":" + std::to_string(number) + "\r\n";
+  }
   return "-ERR unknown command\r\n";
 }
 
