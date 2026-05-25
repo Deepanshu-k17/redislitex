@@ -111,46 +111,47 @@ int main()
 
   std::cout << "RedisLiteX listening on port " << port << "\n";
 
-  sockaddr_in client_addr{};
-  socklen_t client_len = sizeof(client_addr);
-
-  int client_fd = accept(server_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
-  if (client_fd == -1)
-  {
-    std::cerr << "Could not accept client\n";
-    close(server_fd);
-    return 1;
-  }
-
-  std::cout << "Client connected\n";
-
   while (true)
   {
-    char buffer[1024]{};
-    ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+    sockaddr_in client_addr{};
+    socklen_t client_len = sizeof(client_addr);
 
-    if (bytes_read == 0)
+    int client_fd = accept(server_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
+    if (client_fd == -1)
     {
-      std::cout << "Client disconnected\n";
-      break;
+      std::cerr << "Could not accept client\n";
+      continue;
     }
 
-    if (bytes_read < 0)
+    std::cout << "Client connected\n";
+
+    while (true)
     {
-      std::cerr << "Error while reading from client\n";
-      break;
+      char buffer[1024]{};
+      ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+
+      if (bytes_read == 0)
+      {
+        std::cout << "Client disconnected\n";
+        break;
+      }
+
+      if (bytes_read < 0)
+      {
+        std::cerr << "Error while reading from client\n";
+        break;
+      }
+
+      std::string request(buffer, bytes_read);
+      std::cout << "Received: " << request;
+
+      std::string response = handleCommand(request);
+      send(client_fd, response.c_str(), response.size(), 0);
     }
 
-    std::string request(buffer, bytes_read);
-    std::cout << "Received: " << request;
-
-    std::string response = handleCommand(request);
-    send(client_fd, response.c_str(), response.size(), 0);
+    close(client_fd);
   }
 
-  close(client_fd);
   close(server_fd);
-
-  std::cout << "Server stopped\n";
   return 0;
 }
