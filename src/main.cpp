@@ -1,13 +1,16 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 #include <unordered_map>
 
 std::unordered_map<std::string, std::string> store;
+std::mutex store_mutex;
 
 std::string makeBulkString(const std::string &value)
 {
@@ -36,7 +39,9 @@ std::string handleCommand(const std::string &request)
       return "-ERR usage: SET key value\r\n";
     }
 
+    std::lock_guard<std::mutex> lock(store_mutex);
     store[key] = value;
+
     return "+OK\r\n";
   }
 
@@ -49,6 +54,8 @@ std::string handleCommand(const std::string &request)
     {
       return "-ERR usage: GET key\r\n";
     }
+
+    std::lock_guard<std::mutex> lock(store_mutex);
 
     auto it = store.find(key);
     if (it == store.end())
@@ -69,11 +76,44 @@ std::string handleCommand(const std::string &request)
       return "-ERR usage: DEL key\r\n";
     }
 
+    std::lock_guard<std::mutex> lock(store_mutex);
+
     int deleted = store.erase(key);
     return ":" + std::to_string(deleted) + "\r\n";
   }
 
   return "-ERR unknown command\r\n";
+}
+
+void handleClient(int client_fd)
+{
+  std::cout << "Client connected\n";
+
+  while (true)
+  {
+    char buffer[1024]{};
+    ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+
+    if (bytes_read == 0)
+    {
+      std::cout << "Client disconnected\n";
+      break;
+    }
+
+    if (bytes_read < 0)
+    {
+      std::cerr << "Error while reading from client\n";
+      break;
+    }
+
+    std::string request(buffer, bytes_read);
+    std::cout << "Received: " << request;
+
+    std::string response = handleCommand(request);
+    send(client_fd, response.c_str(), response.size(), 0);
+  }
+
+  close(client_fd);
 }
 
 int main()
@@ -123,33 +163,8 @@ int main()
       continue;
     }
 
-    std::cout << "Client connected\n";
-
-    while (true)
-    {
-      char buffer[1024]{};
-      ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-
-      if (bytes_read == 0)
-      {
-        std::cout << "Client disconnected\n";
-        break;
-      }
-
-      if (bytes_read < 0)
-      {
-        std::cerr << "Error while reading from client\n";
-        break;
-      }
-
-      std::string request(buffer, bytes_read);
-      std::cout << "Received: " << request;
-
-      std::string response = handleCommand(request);
-      send(client_fd, response.c_str(), response.size(), 0);
-    }
-
-    close(client_fd);
+    std::thread client_thread(handleClient, client_fd);
+    client_thread.detach();
   }
 
   close(server_fd);
