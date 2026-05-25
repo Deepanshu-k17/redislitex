@@ -1,15 +1,76 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <unordered_map>
+
+std::unordered_map<std::string, std::string> store;
+
+std::string makeBulkString(const std::string &value)
+{
+  return "$" + std::to_string(value.size()) + "\r\n" + value + "\r\n";
+}
 
 std::string handleCommand(const std::string &request)
 {
-  if (request.find("PING") != std::string::npos)
+  std::stringstream ss(request);
+
+  std::string command;
+  ss >> command;
+
+  if (command == "PING")
   {
     return "+PONG\r\n";
+  }
+
+  if (command == "SET")
+  {
+    std::string key, value;
+    ss >> key >> value;
+
+    if (key.empty() || value.empty())
+    {
+      return "-ERR usage: SET key value\r\n";
+    }
+
+    store[key] = value;
+    return "+OK\r\n";
+  }
+
+  if (command == "GET")
+  {
+    std::string key;
+    ss >> key;
+
+    if (key.empty())
+    {
+      return "-ERR usage: GET key\r\n";
+    }
+
+    auto it = store.find(key);
+    if (it == store.end())
+    {
+      return "$-1\r\n";
+    }
+
+    return makeBulkString(it->second);
+  }
+
+  if (command == "DEL")
+  {
+    std::string key;
+    ss >> key;
+
+    if (key.empty())
+    {
+      return "-ERR usage: DEL key\r\n";
+    }
+
+    int deleted = store.erase(key);
+    return ":" + std::to_string(deleted) + "\r\n";
   }
 
   return "-ERR unknown command\r\n";
