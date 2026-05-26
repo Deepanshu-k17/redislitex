@@ -9,8 +9,16 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <cctype>
+#include <chrono>
+#include <optional>
 
-std::unordered_map<std::string, std::string> store;
+struct Value
+{
+  std::string data;
+  std::optional<std::chrono::steady_clock::time_point> expiry;
+};
+
+std::unordered_map<std::string, Value> store;
 std::mutex store_mutex;
 
 std::string makeBulkString(const std::string &value)
@@ -46,6 +54,34 @@ bool isInteger(const std::string &value)
   return true;
 }
 
+bool isExpired(const Value &value)
+{
+  if (!value.expiry.has_value())
+  {
+    return false;
+  }
+
+  return std::chrono::steady_clock::now() >= value.expiry.value();
+}
+
+bool removeIfExpired(const std::string &key)
+{
+  auto it = store.find(key);
+
+  if (it == store.end())
+  {
+    return false;
+  }
+
+  if (isExpired(it->second))
+  {
+    store.erase(it);
+    return true;
+  }
+
+  return false;
+}
+
 std::string handleCommand(const std::string &request)
 {
   std::stringstream ss(request);
@@ -69,7 +105,7 @@ std::string handleCommand(const std::string &request)
     }
 
     std::lock_guard<std::mutex> lock(store_mutex);
-    store[key] = value;
+    store[key] = Value{value, std::nullopt};
 
     return "+OK\r\n";
   }
@@ -85,6 +121,7 @@ std::string handleCommand(const std::string &request)
     }
 
     std::lock_guard<std::mutex> lock(store_mutex);
+    removeIfExpired(key);
 
     auto it = store.find(key);
     if (it == store.end())
@@ -92,7 +129,7 @@ std::string handleCommand(const std::string &request)
       return "$-1\r\n";
     }
 
-    return makeBulkString(it->second);
+    return makeBulkString(it->second.data);
   }
   if (command == "EXISTS")
   {
@@ -105,9 +142,74 @@ std::string handleCommand(const std::string &request)
     }
 
     std::lock_guard<std::mutex> lock(store_mutex);
+    removeIfExpired(key);
 
     bool found = store.find(key) != store.end();
     return ":" + std::to_string(found ? 1 : 0) + "\r\n";
+  }
+  if (command == "EXPIRE")
+  {
+    std::string key;
+    int seconds;
+
+    ss >> key >> seconds;
+
+    if (key.empty() || seconds < 0)
+    {
+      return "-ERR usage: EXPIRE key seconds\r\n";
+    }
+
+    std::lock_guard<std::mutex> lock(store_mutex);
+
+    removeIfExpired(key);
+
+    auto it = store.find(key);
+    if (it == store.end())
+    {
+      return ":0\r\n";
+    }
+
+    it->second.expiry = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+
+    return ":1\r\n";
+  }
+  if (command == "TTL")
+  {
+    std::string key;
+    ss >> key;
+
+    if (key.empty())
+    {
+      return "-ERR usage: TTL key\r\n";
+    }
+
+    std::lock_guard<std::mutex> lock(store_mutex);
+
+    removeIfExpired(key);
+
+    auto it = store.find(key);
+    if (it == store.end())
+    {
+      return ":-2\r\n";
+    }
+
+    if (!it->second.expiry.has_value())
+    {
+      return ":-1\r\n";
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
+                         it->second.expiry.value() - now)
+                         .count();
+
+    if (remaining < 0)
+    {
+      store.erase(it);
+      return ":-2\r\n";
+    }
+
+    return ":" + std::to_string(remaining) + "\r\n";
   }
   if (command == "DEL")
   {
@@ -120,6 +222,7 @@ std::string handleCommand(const std::string &request)
     }
 
     std::lock_guard<std::mutex> lock(store_mutex);
+    removeIfExpired(key);
 
     int deleted = store.erase(key);
     return ":" + std::to_string(deleted) + "\r\n";
@@ -136,20 +239,22 @@ std::string handleCommand(const std::string &request)
 
     std::lock_guard<std::mutex> lock(store_mutex);
 
+    removeIfExpired(key);
+
     if (store.find(key) == store.end())
     {
-      store[key] = "1";
+      store[key] = Value{"1", std::nullopt};
       return ":1\r\n";
     }
 
-    if (!isInteger(store[key]))
+    if (!isInteger(store[key].data))
     {
       return "-ERR value is not an integer\r\n";
     }
 
-    long long number = std::stoll(store[key]);
+    long long number = std::stoll(store[key].data);
     number++;
-    store[key] = std::to_string(number);
+    store[key].data = std::to_string(number);
 
     return ":" + std::to_string(number) + "\r\n";
   }
@@ -165,20 +270,22 @@ std::string handleCommand(const std::string &request)
 
     std::lock_guard<std::mutex> lock(store_mutex);
 
+    removeIfExpired(key);
+
     if (store.find(key) == store.end())
     {
-      store[key] = "-1";
+      store[key] = Value{"-1", std::nullopt};
       return ":-1\r\n";
     }
 
-    if (!isInteger(store[key]))
+    if (!isInteger(store[key].data))
     {
       return "-ERR value is not an integer\r\n";
     }
 
-    long long number = std::stoll(store[key]);
+    long long number = std::stoll(store[key].data);
     number--;
-    store[key] = std::to_string(number);
+    store[key].data = std::to_string(number);
 
     return ":" + std::to_string(number) + "\r\n";
   }
