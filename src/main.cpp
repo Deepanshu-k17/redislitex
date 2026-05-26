@@ -1,16 +1,17 @@
 #include <arpa/inet.h>
+#include <chrono>
+#include <cctype>
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
-#include <cctype>
-#include <chrono>
-#include <optional>
+#include <vector>
 
 struct Value
 {
@@ -82,12 +83,96 @@ bool removeIfExpired(const std::string &key)
   return false;
 }
 
-std::string handleCommand(const std::string &request)
+std::vector<std::string> parseRespCommand(const std::string &request)
+{
+  std::vector<std::string> parts;
+
+  if (request.empty() || request[0] != '*')
+  {
+    return parts;
+  }
+
+  size_t pos = 1;
+  size_t line_end = request.find("\r\n", pos);
+
+  if (line_end == std::string::npos)
+  {
+    return parts;
+  }
+
+  int array_size = std::stoi(request.substr(pos, line_end - pos));
+  pos = line_end + 2;
+
+  for (int i = 0; i < array_size; i++)
+  {
+    if (pos >= request.size() || request[pos] != '$')
+    {
+      return {};
+    }
+
+    pos++;
+    line_end = request.find("\r\n", pos);
+
+    if (line_end == std::string::npos)
+    {
+      return {};
+    }
+
+    int bulk_size = std::stoi(request.substr(pos, line_end - pos));
+    pos = line_end + 2;
+
+    if (pos + bulk_size > request.size())
+    {
+      return {};
+    }
+
+    std::string value = request.substr(pos, bulk_size);
+    parts.push_back(value);
+
+    pos += bulk_size;
+
+    if (pos + 2 <= request.size() && request.substr(pos, 2) == "\r\n")
+    {
+      pos += 2;
+    }
+  }
+
+  return parts;
+}
+
+std::vector<std::string> parsePlainCommand(const std::string &request)
 {
   std::stringstream ss(request);
+  std::vector<std::string> parts;
 
-  std::string command;
-  ss >> command;
+  std::string word;
+  while (ss >> word)
+  {
+    parts.push_back(word);
+  }
+
+  return parts;
+}
+
+std::string handleCommand(const std::string &request)
+{
+  std::vector<std::string> parts;
+
+  if (!request.empty() && request[0] == '*')
+  {
+    parts = parseRespCommand(request);
+  }
+  else
+  {
+    parts = parsePlainCommand(request);
+  }
+
+  if (parts.empty())
+  {
+    return "-ERR invalid command\r\n";
+  }
+
+  std::string command = parts[0];
 
   if (command == "PING")
   {
@@ -96,13 +181,13 @@ std::string handleCommand(const std::string &request)
 
   if (command == "SET")
   {
-    std::string key, value;
-    ss >> key >> value;
-
-    if (key.empty() || value.empty())
+    if (parts.size() < 3)
     {
       return "-ERR usage: SET key value\r\n";
     }
+
+    std::string key = parts[1];
+    std::string value = parts[2];
 
     std::lock_guard<std::mutex> lock(store_mutex);
     store[key] = Value{value, std::nullopt};
@@ -112,15 +197,15 @@ std::string handleCommand(const std::string &request)
 
   if (command == "GET")
   {
-    std::string key;
-    ss >> key;
-
-    if (key.empty())
+    if (parts.size() < 2)
     {
       return "-ERR usage: GET key\r\n";
     }
 
+    std::string key = parts[1];
+
     std::lock_guard<std::mutex> lock(store_mutex);
+
     removeIfExpired(key);
 
     auto it = store.find(key);
@@ -131,30 +216,35 @@ std::string handleCommand(const std::string &request)
 
     return makeBulkString(it->second.data);
   }
+
   if (command == "EXISTS")
   {
-    std::string key;
-    ss >> key;
-
-    if (key.empty())
+    if (parts.size() < 2)
     {
       return "-ERR usage: EXISTS key\r\n";
     }
 
+    std::string key = parts[1];
+
     std::lock_guard<std::mutex> lock(store_mutex);
+
     removeIfExpired(key);
 
     bool found = store.find(key) != store.end();
     return ":" + std::to_string(found ? 1 : 0) + "\r\n";
   }
+
   if (command == "EXPIRE")
   {
-    std::string key;
-    int seconds;
+    if (parts.size() < 3 || !isInteger(parts[2]))
+    {
+      return "-ERR usage: EXPIRE key seconds\r\n";
+    }
 
-    ss >> key >> seconds;
+    std::string key = parts[1];
+    int seconds = std::stoi(parts[2]);
 
-    if (key.empty() || seconds < 0)
+    if (seconds < 0)
     {
       return "-ERR usage: EXPIRE key seconds\r\n";
     }
@@ -173,15 +263,15 @@ std::string handleCommand(const std::string &request)
 
     return ":1\r\n";
   }
+
   if (command == "TTL")
   {
-    std::string key;
-    ss >> key;
-
-    if (key.empty())
+    if (parts.size() < 2)
     {
       return "-ERR usage: TTL key\r\n";
     }
+
+    std::string key = parts[1];
 
     std::lock_guard<std::mutex> lock(store_mutex);
 
@@ -211,31 +301,32 @@ std::string handleCommand(const std::string &request)
 
     return ":" + std::to_string(remaining) + "\r\n";
   }
+
   if (command == "DEL")
   {
-    std::string key;
-    ss >> key;
-
-    if (key.empty())
+    if (parts.size() < 2)
     {
       return "-ERR usage: DEL key\r\n";
     }
 
+    std::string key = parts[1];
+
     std::lock_guard<std::mutex> lock(store_mutex);
+
     removeIfExpired(key);
 
     int deleted = store.erase(key);
     return ":" + std::to_string(deleted) + "\r\n";
   }
+
   if (command == "INCR")
   {
-    std::string key;
-    ss >> key;
-
-    if (key.empty())
+    if (parts.size() < 2)
     {
       return "-ERR usage: INCR key\r\n";
     }
+
+    std::string key = parts[1];
 
     std::lock_guard<std::mutex> lock(store_mutex);
 
@@ -258,15 +349,15 @@ std::string handleCommand(const std::string &request)
 
     return ":" + std::to_string(number) + "\r\n";
   }
+
   if (command == "DECR")
   {
-    std::string key;
-    ss >> key;
-
-    if (key.empty())
+    if (parts.size() < 2)
     {
       return "-ERR usage: DECR key\r\n";
     }
+
+    std::string key = parts[1];
 
     std::lock_guard<std::mutex> lock(store_mutex);
 
@@ -289,6 +380,7 @@ std::string handleCommand(const std::string &request)
 
     return ":" + std::to_string(number) + "\r\n";
   }
+
   return "-ERR unknown command\r\n";
 }
 
@@ -298,7 +390,7 @@ void handleClient(int client_fd)
 
   while (true)
   {
-    char buffer[1024]{};
+    char buffer[4096]{};
     ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
 
     if (bytes_read == 0)
