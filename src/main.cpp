@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstring>
@@ -21,6 +22,7 @@ struct Value
 
 std::unordered_map<std::string, Value> store;
 std::mutex store_mutex;
+std::atomic<bool> server_running(true);
 
 std::string makeBulkString(const std::string &value)
 {
@@ -383,6 +385,37 @@ std::string handleCommand(const std::string &request)
 
   return "-ERR unknown command\r\n";
 }
+void cleanupExpiredKeys()
+{
+  while (server_running)
+  {
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+
+    int removed_count = 0;
+
+    {
+      std::lock_guard<std::mutex> lock(store_mutex);
+
+      for (auto it = store.begin(); it != store.end();)
+      {
+        if (isExpired(it->second))
+        {
+          it = store.erase(it);
+          removed_count++;
+        }
+        else
+        {
+          ++it;
+        }
+      }
+    }
+
+    if (removed_count > 0)
+    {
+      std::cout << "Cleaned up " << removed_count << " expired keys\n";
+    }
+  }
+}
 
 void handleClient(int client_fd)
 {
@@ -449,6 +482,8 @@ int main()
   }
 
   std::cout << "RedisLiteX listening on port " << port << "\n";
+  std::thread cleanup_thread(cleanupExpiredKeys);
+  cleanup_thread.detach();
 
   while (true)
   {
