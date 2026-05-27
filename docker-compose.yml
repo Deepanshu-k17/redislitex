@@ -1,0 +1,6 @@
+services:
+  redislitex:
+    build: .
+    container_name: redislitex
+    ports:
+      - "6379:6379"
