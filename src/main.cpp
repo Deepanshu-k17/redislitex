@@ -6,13 +6,14 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
-#include <vector>
+#include <cctype>
+
+#include "protocol/resp.hpp"
 
 struct Value
 {
@@ -23,39 +24,6 @@ struct Value
 std::unordered_map<std::string, Value> store;
 std::mutex store_mutex;
 std::atomic<bool> server_running(true);
-
-std::string makeBulkString(const std::string &value)
-{
-  return "$" + std::to_string(value.size()) + "\r\n" + value + "\r\n";
-}
-
-bool isInteger(const std::string &value)
-{
-  if (value.empty())
-  {
-    return false;
-  }
-
-  int start = 0;
-  if (value[0] == '-')
-  {
-    if (value.size() == 1)
-    {
-      return false;
-    }
-    start = 1;
-  }
-
-  for (int i = start; i < (int)value.size(); i++)
-  {
-    if (!std::isdigit(value[i]))
-    {
-      return false;
-    }
-  }
-
-  return true;
-}
 
 bool isExpired(const Value &value)
 {
@@ -84,76 +52,34 @@ bool removeIfExpired(const std::string &key)
 
   return false;
 }
-
-std::vector<std::string> parseRespCommand(const std::string &request)
+bool isInteger(const std::string &value)
 {
-  std::vector<std::string> parts;
-
-  if (request.empty() || request[0] != '*')
+  if (value.empty())
   {
-    return parts;
+    return false;
   }
 
-  size_t pos = 1;
-  size_t line_end = request.find("\r\n", pos);
+  int start = 0;
 
-  if (line_end == std::string::npos)
+  if (value[0] == '-')
   {
-    return parts;
+    if (value.size() == 1)
+    {
+      return false;
+    }
+
+    start = 1;
   }
 
-  int array_size = std::stoi(request.substr(pos, line_end - pos));
-  pos = line_end + 2;
-
-  for (int i = 0; i < array_size; i++)
+  for (int i = start; i < (int)value.size(); i++)
   {
-    if (pos >= request.size() || request[pos] != '$')
+    if (!std::isdigit(value[i]))
     {
-      return {};
-    }
-
-    pos++;
-    line_end = request.find("\r\n", pos);
-
-    if (line_end == std::string::npos)
-    {
-      return {};
-    }
-
-    int bulk_size = std::stoi(request.substr(pos, line_end - pos));
-    pos = line_end + 2;
-
-    if (pos + bulk_size > request.size())
-    {
-      return {};
-    }
-
-    std::string value = request.substr(pos, bulk_size);
-    parts.push_back(value);
-
-    pos += bulk_size;
-
-    if (pos + 2 <= request.size() && request.substr(pos, 2) == "\r\n")
-    {
-      pos += 2;
+      return false;
     }
   }
 
-  return parts;
-}
-
-std::vector<std::string> parsePlainCommand(const std::string &request)
-{
-  std::stringstream ss(request);
-  std::vector<std::string> parts;
-
-  std::string word;
-  while (ss >> word)
-  {
-    parts.push_back(word);
-  }
-
-  return parts;
+  return true;
 }
 
 std::string handleCommand(const std::string &request)
