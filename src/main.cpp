@@ -1,86 +1,20 @@
 #include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
-#include <cctype>
 #include <cstring>
 #include <iostream>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
-#include <unordered_map>
 #include <cctype>
 
 #include "protocol/resp.hpp"
+#include "store/kv_store.hpp"
 
-struct Value
-{
-  std::string data;
-  std::optional<std::chrono::steady_clock::time_point> expiry;
-};
-
-std::unordered_map<std::string, Value> store;
-std::mutex store_mutex;
+KVStore kv_store;
 std::atomic<bool> server_running(true);
-
-bool isExpired(const Value &value)
-{
-  if (!value.expiry.has_value())
-  {
-    return false;
-  }
-
-  return std::chrono::steady_clock::now() >= value.expiry.value();
-}
-
-bool removeIfExpired(const std::string &key)
-{
-  auto it = store.find(key);
-
-  if (it == store.end())
-  {
-    return false;
-  }
-
-  if (isExpired(it->second))
-  {
-    store.erase(it);
-    return true;
-  }
-
-  return false;
-}
-bool isInteger(const std::string &value)
-{
-  if (value.empty())
-  {
-    return false;
-  }
-
-  int start = 0;
-
-  if (value[0] == '-')
-  {
-    if (value.size() == 1)
-    {
-      return false;
-    }
-
-    start = 1;
-  }
-
-  for (int i = start; i < (int)value.size(); i++)
-  {
-    if (!std::isdigit(value[i]))
-    {
-      return false;
-    }
-  }
-
-  return true;
-}
 
 std::string handleCommand(const std::string &request)
 {
@@ -114,11 +48,7 @@ std::string handleCommand(const std::string &request)
       return "-ERR usage: SET key value\r\n";
     }
 
-    std::string key = parts[1];
-    std::string value = parts[2];
-
-    std::lock_guard<std::mutex> lock(store_mutex);
-    store[key] = Value{value, std::nullopt};
+    kv_store.set(parts[1], parts[2]);
 
     return "+OK\r\n";
   }
@@ -130,19 +60,13 @@ std::string handleCommand(const std::string &request)
       return "-ERR usage: GET key\r\n";
     }
 
-    std::string key = parts[1];
-
-    std::lock_guard<std::mutex> lock(store_mutex);
-
-    removeIfExpired(key);
-
-    auto it = store.find(key);
-    if (it == store.end())
+    auto value = kv_store.get(parts[1]);
+    if (!value.has_value())
     {
       return "$-1\r\n";
     }
 
-    return makeBulkString(it->second.data);
+    return makeBulkString(value.value());
   }
 
   if (command == "EXISTS")
@@ -152,44 +76,35 @@ std::string handleCommand(const std::string &request)
       return "-ERR usage: EXISTS key\r\n";
     }
 
-    std::string key = parts[1];
-
-    std::lock_guard<std::mutex> lock(store_mutex);
-
-    removeIfExpired(key);
-
-    bool found = store.find(key) != store.end();
+    bool found = kv_store.exists(parts[1]);
     return ":" + std::to_string(found ? 1 : 0) + "\r\n";
   }
 
   if (command == "EXPIRE")
   {
-    if (parts.size() < 3 || !isInteger(parts[2]))
+    if (parts.size() < 3)
     {
       return "-ERR usage: EXPIRE key seconds\r\n";
     }
 
-    std::string key = parts[1];
-    int seconds = std::stoi(parts[2]);
+    int seconds;
+
+    try
+    {
+      seconds = std::stoi(parts[2]);
+    }
+    catch (...)
+    {
+      return "-ERR usage: EXPIRE key seconds\r\n";
+    }
 
     if (seconds < 0)
     {
       return "-ERR usage: EXPIRE key seconds\r\n";
     }
 
-    std::lock_guard<std::mutex> lock(store_mutex);
-
-    removeIfExpired(key);
-
-    auto it = store.find(key);
-    if (it == store.end())
-    {
-      return ":0\r\n";
-    }
-
-    it->second.expiry = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
-
-    return ":1\r\n";
+    int result = kv_store.expire(parts[1], seconds);
+    return ":" + std::to_string(result) + "\r\n";
   }
 
   if (command == "TTL")
@@ -199,35 +114,8 @@ std::string handleCommand(const std::string &request)
       return "-ERR usage: TTL key\r\n";
     }
 
-    std::string key = parts[1];
-
-    std::lock_guard<std::mutex> lock(store_mutex);
-
-    removeIfExpired(key);
-
-    auto it = store.find(key);
-    if (it == store.end())
-    {
-      return ":-2\r\n";
-    }
-
-    if (!it->second.expiry.has_value())
-    {
-      return ":-1\r\n";
-    }
-
-    auto now = std::chrono::steady_clock::now();
-    auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
-                         it->second.expiry.value() - now)
-                         .count();
-
-    if (remaining < 0)
-    {
-      store.erase(it);
-      return ":-2\r\n";
-    }
-
-    return ":" + std::to_string(remaining) + "\r\n";
+    long long result = kv_store.ttl(parts[1]);
+    return ":" + std::to_string(result) + "\r\n";
   }
 
   if (command == "DEL")
@@ -237,13 +125,7 @@ std::string handleCommand(const std::string &request)
       return "-ERR usage: DEL key\r\n";
     }
 
-    std::string key = parts[1];
-
-    std::lock_guard<std::mutex> lock(store_mutex);
-
-    removeIfExpired(key);
-
-    int deleted = store.erase(key);
+    int deleted = kv_store.del(parts[1]);
     return ":" + std::to_string(deleted) + "\r\n";
   }
 
@@ -254,28 +136,13 @@ std::string handleCommand(const std::string &request)
       return "-ERR usage: INCR key\r\n";
     }
 
-    std::string key = parts[1];
-
-    std::lock_guard<std::mutex> lock(store_mutex);
-
-    removeIfExpired(key);
-
-    if (store.find(key) == store.end())
-    {
-      store[key] = Value{"1", std::nullopt};
-      return ":1\r\n";
-    }
-
-    if (!isInteger(store[key].data))
+    auto result = kv_store.incr(parts[1]);
+    if (!result.has_value())
     {
       return "-ERR value is not an integer\r\n";
     }
 
-    long long number = std::stoll(store[key].data);
-    number++;
-    store[key].data = std::to_string(number);
-
-    return ":" + std::to_string(number) + "\r\n";
+    return ":" + std::to_string(result.value()) + "\r\n";
   }
 
   if (command == "DECR")
@@ -285,28 +152,13 @@ std::string handleCommand(const std::string &request)
       return "-ERR usage: DECR key\r\n";
     }
 
-    std::string key = parts[1];
-
-    std::lock_guard<std::mutex> lock(store_mutex);
-
-    removeIfExpired(key);
-
-    if (store.find(key) == store.end())
-    {
-      store[key] = Value{"-1", std::nullopt};
-      return ":-1\r\n";
-    }
-
-    if (!isInteger(store[key].data))
+    auto result = kv_store.decr(parts[1]);
+    if (!result.has_value())
     {
       return "-ERR value is not an integer\r\n";
     }
 
-    long long number = std::stoll(store[key].data);
-    number--;
-    store[key].data = std::to_string(number);
-
-    return ":" + std::to_string(number) + "\r\n";
+    return ":" + std::to_string(result.value()) + "\r\n";
   }
 
   return "-ERR unknown command\r\n";
@@ -317,24 +169,7 @@ void cleanupExpiredKeys()
   {
     std::this_thread::sleep_for(std::chrono::seconds(5));
 
-    int removed_count = 0;
-
-    {
-      std::lock_guard<std::mutex> lock(store_mutex);
-
-      for (auto it = store.begin(); it != store.end();)
-      {
-        if (isExpired(it->second))
-        {
-          it = store.erase(it);
-          removed_count++;
-        }
-        else
-        {
-          ++it;
-        }
-      }
-    }
+    int removed_count = kv_store.cleanupExpiredKeys();
 
     if (removed_count > 0)
     {

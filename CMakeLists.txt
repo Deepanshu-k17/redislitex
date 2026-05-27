@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(redislitex
     src/main.cpp
     src/protocol/resp.cpp
+    src/store/kv_store.cpp
 )
 
 target_include_directories(redislitex PRIVATE include)
