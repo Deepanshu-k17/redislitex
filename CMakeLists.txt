@@ -11,4 +11,9 @@ add_executable(redislitex
     src/server/tcp_server.cpp
 )
 
+add_executable(redislitex_bench
+    benchmark/bench_client.cpp
+)
+
 target_include_directories(redislitex PRIVATE include)
+target_include_directories(redislitex_bench PRIVATE include)
